@@ -1,77 +1,66 @@
-#include <Arduino.h>
 #include "driver/twai.h"
-#include "driver/gpio.h" 
 
-#define CAN_TX_PIN 5  // Physical pin D5
-#define CAN_RX_PIN 4  // Physical pin D4
-
-unsigned long previousMillis = 0;
-const long broadcastInterval = 100; 
-
-void sendGatewayWakeFrame();
+#define TX_PIN GPIO_NUM_4
+#define RX_PIN GPIO_NUM_5
 
 void setup() {
     Serial.begin(115200);
-    while(!Serial) { delay(10); } 
+    delay(2000);
+    Serial.println("=========================================");
+    Serial.println("Initializing Audi B8.5 - 500K High Speed");
+    Serial.println("=========================================");
     
-    Serial.println("=========================================");
-    Serial.println("Audi B8.5 S5 Cluster Simulator (Software Bias)");
-    Serial.println("=========================================");
+    // Switch back to 500 kbps 
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_PIN, RX_PIN, TWAI_MODE_NORMAL);
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS(); 
+    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-    // Activate internal ESP32 pull-ups to stabilize the un-terminated bus lines
-    pinMode(CAN_TX_PIN, INPUT_PULLUP);
-    pinMode(CAN_RX_PIN, INPUT_PULLUP);
-    delay(10);
-
-    // Initialize Network parameters
-    twai_general_config_t general_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN, (gpio_num_t)CAN_RX_PIN, TWAI_MODE_NORMAL);
-    twai_timing_config_t timing_config = TWAI_TIMING_CONFIG_500KBITS(); 
-    twai_filter_config_t filter_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-
-    if (twai_driver_install(&general_config, &timing_config, &filter_config) != ESP_OK) {
-        Serial.println("Status: Internal driver failed to install.");
+    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+        Serial.println("[OK] TWAI Driver Installed.");
+    } else {
+        Serial.println("[FAIL] Driver installation failed.");
         return;
     }
 
-    if (twai_start() != ESP_OK) {
-        Serial.println("Status: Internal driver failed to start.");
+    if (twai_start() == ESP_OK) {
+        Serial.println("[OK] Driver running at 500kbps.");
+    } else {
+        Serial.println("[FAIL] Failed to start driver.");
         return;
     }
-
-    Serial.println("Status: Transmitting 500kbps gateway wake sequence...");
 }
 
 void loop() {
-    unsigned long currentMillis = millis();
-    
-    if (currentMillis - previousMillis >= broadcastInterval) {
-        previousMillis = currentMillis;
-        sendGatewayWakeFrame();
-    }
-}
+    twai_message_t msg_ignition;
+    msg_ignition.identifier = 0x271;       
+    msg_ignition.extd = 0;
+    msg_ignition.rtr = 0;
+    msg_ignition.data_length_code = 8;
+    msg_ignition.data[0] = 0x01;           
+    msg_ignition.data[1] = 0x0B;           
+    for(int i=2; i<8; i++) msg_ignition.data[i] = 0x00;
 
-void sendGatewayWakeFrame() {
-    twai_message_t tx_frame;
-    
-    tx_frame.identifier = 0x3C0;       
-    tx_frame.extd = 0;                 
-    tx_frame.data_length_code = 8;     
-    
-    tx_frame.data[0] = 0x03; 
-    tx_frame.data[1] = 0x01; 
-    tx_frame.data[2] = 0x00; 
-    tx_frame.data[3] = 0x00; 
-    tx_frame.data[4] = 0x00; 
-    tx_frame.data[5] = 0x00; 
-    tx_frame.data[6] = 0x00; 
-    tx_frame.data[7] = 0x00;
+    // Transmit ignition wake-up
+    twai_transmit(&msg_ignition, pdMS_TO_TICKS(5));
+    delay(5); 
 
-    if (twai_transmit(&tx_frame, pdMS_TO_TICKS(10)) != ESP_OK) {
-        // Reduced serial spam for un-terminated testing
-        static unsigned long lastAlert = 0;
-        if (millis() - lastAlert > 2000) {
-            Serial.println("Bus Notice: Signal reflecting (Missing hardware resistor). Retrying...");
-            lastAlert = millis();
-        }
+    twai_message_t msg_rpm;
+    msg_rpm.identifier = 0x105;            
+    msg_rpm.extd = 0;
+    msg_rpm.rtr = 0;
+    msg_rpm.data_length_code = 8;
+    msg_rpm.data[0] = 0x00; 
+    msg_rpm.data[1] = 0x00; 
+    msg_rpm.data[2] = 0xE0;                // 3000 RPM
+    msg_rpm.data[3] = 0x2E;                
+    for(int i=4; i<8; i++) msg_rpm.data[i] = 0x00; 
+
+    // Transmit RPM metrics
+    if (twai_transmit(&msg_rpm, pdMS_TO_TICKS(5)) == ESP_OK) {
+        Serial.println("[TX] Frames acknowledged at 500kbps.");
+    } else {
+        Serial.println("[WARN] No ACK received. Check wire polarity (try swapping CANH/CANL).");
     }
+
+    delay(20); 
 }
